@@ -1,5 +1,7 @@
+import os
 import random
 import time
+from hashlib import shake_256
 
 from montgomery_isogenies.kummer_line import KummerLine
 from montgomery_isogenies.kummer_isogeny import KummerLineIsogeny
@@ -104,9 +106,23 @@ def random_unit(modulus):
 
     return alpha
 
-def KDF(X, Y):
-    return X.__hash__() ^^ Y.__hash__()
+def xof_kdf(X, Y):
+    """
+    A simple key-derivation function which initalised an XOF from two
+    finite field elements. A key is intended to then be derived from
+    this by requesting len(key) bytes, see meth:xof_encrypt
+    """
+    X_bytes = X.to_bytes()
+    Y_bytes = Y.to_bytes() 
+    return shake_256(X_bytes + Y_bytes)
 
+def xof_encrypt(xof, msg):
+    """
+    Compute the XOR encryption of a message by sampling
+    len(msg) bytes from a suitible XOF.
+    """
+    key = xof.digest(len(msg))
+    return bytes(x ^^ y for (x, y) in zip(key, msg))
 
 def random_matrix(modulus):
     while True:
@@ -360,14 +376,20 @@ for i, lambda_ in enumerate([128, 192, 256]):
             Y_AB = -Y_AB
 
         X_AB, Y_AB = d1*X_AB + d2*Y_AB, d3*X_AB + d4*Y_AB
+
+        # An XOF is initiated from the x-coordinates of two elliptic curve points
+        # and a message is encrypted by sampling len(m) bytes from the XOF and
+        # using this as a XOR key
+        xof = xof_kdf(X_AB[0], Y_AB[0])
+        ct = xof_encrypt(xof, m)
             
-        return EB.curve(), P2_B, Q2_B, X_B, Y_B, EAB, P2_AB, Q2_AB, m ^^ KDF(X_AB[0], Y_AB[0])
+        return EB.curve(), P2_B, Q2_B, X_B, Y_B, EAB, P2_AB, Q2_AB, ct
 
 
 
     def decrypt(skA, ct):
         deg, alpha, beta, delta = skA
-        EB, P2_B, Q2_B, X_B, Y_B, EAB, P2_AB, Q2_AB, ct_ = ct
+        EB, P2_B, Q2_B, X_B, Y_B, EAB, P2_AB, Q2_AB, ct_bytes = ct
         
         P2_AB = inverse_mod(alpha, A) * P2_AB
         Q2_AB =  inverse_mod(beta, A) * Q2_AB
@@ -385,14 +407,22 @@ for i, lambda_ in enumerate([128, 192, 256]):
         X_AB *= delta
         Y_AB *= delta
 
-        return ct_ ^^ KDF(X_AB[0], Y_AB[0])
+        # An XOF is initiated from the x-coordinates of two elliptic curve points
+        # and a message is recovered by sampling a key from the XOF and computing
+        # the XOR with the ciphertext
+        xof = xof_kdf(X_AB[0], Y_AB[0])
+        pt = xof_encrypt(xof, ct_bytes)
+
+        return pt
 
     N = 100 # number of iterations
     tt = [0, 0, 0]
     correct = 0
 
     for _ in range(N):
-        m = random.randint(0, 2^128 - 1)
+        # Sample messages of length [1, 128]
+        k = random.randint(1, 128)
+        m = os.urandom(k)
         
         t0 = time.time_ns()
         sk, pk = keygenA()
